@@ -230,6 +230,7 @@ static int binder_update_page_range(struct binder_alloc *alloc, int allocate,
 		goto err_no_vma;
 	}
 
+	// 分配物理页面,并将"内核空间"和"用户空间(进程的内存区域)"指向同一块物理内存。
 	for (page_addr = start; page_addr < end; page_addr += PAGE_SIZE) {
 		int ret;
 		bool on_lru;
@@ -275,6 +276,7 @@ static int binder_update_page_range(struct binder_alloc *alloc, int allocate,
 		}
 		user_page_addr =
 			(uintptr_t)page_addr + alloc->user_buffer_offset;
+		// 将物理页面映射插入到进程的虚拟内存中
 		ret = vm_insert_page(vma, user_page_addr, page[0].page_ptr);
 		if (ret) {
 			pr_err("%d: binder_alloc_buf failed to map page at %lx in userspace\n",
@@ -669,14 +671,18 @@ int binder_alloc_mmap_handler(struct binder_alloc *alloc,
 		failure_string = "already mapped";
 		goto err_already_mapped;
 	}
-
+	
+	// 获取空闲的内核空间地址
 	area = get_vm_area(vma->vm_end - vma->vm_start, VM_IOREMAP);
 	if (area == NULL) {
 		ret = -ENOMEM;
 		failure_string = "get_vm_area";
 		goto err_get_vm_area_failed;
 	}
+
+	// 将内核空间地址赋值给proc->buffer，即保存到进程上下文中
 	alloc->buffer = area->addr;
+	// 计算 "内核空间地址" 和 "进程虚拟地址" 的偏移,保存到user_buffer_offset中
 	alloc->user_buffer_offset =
 		vma->vm_start - (uintptr_t)alloc->buffer;
 	mutex_unlock(&binder_alloc_mmap_lock);
@@ -692,6 +698,8 @@ int binder_alloc_mmap_handler(struct binder_alloc *alloc,
 		}
 	}
 #endif
+
+	// 为proc->pages分配内存
 	alloc->pages = kzalloc(sizeof(alloc->pages[0]) *
 				   ((vma->vm_end - vma->vm_start) / PAGE_SIZE),
 			       GFP_KERNEL);
@@ -700,6 +708,7 @@ int binder_alloc_mmap_handler(struct binder_alloc *alloc,
 		failure_string = "alloc page array";
 		goto err_alloc_pages_failed;
 	}
+	// 内核空间的内存大小 = 进程虚拟地址区域(用户空间)的内存大小
 	alloc->buffer_size = vma->vm_end - vma->vm_start;
 
 	buffer = kzalloc(sizeof(*buffer), GFP_KERNEL);

@@ -4753,10 +4753,18 @@ static long binder_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
 	trace_binder_ioctl(cmd, arg);
 
+	/*
+	 * 中断等待函数。
+     * 当binder_stop_on_user_error < 2为true时；不会进入等待状态；直接跳过。
+     * 当binder_stop_on_user_error < 2为false时，进入等待状态。
+     * 当有其他进程通过wake_up_interruptible来唤醒binder_user_error_wait队列，并且binder_stop_on_user_error < 2为true时；
+     * 则继续执行；否则，再进入等待状态。
+	 */
 	ret = wait_event_interruptible(binder_user_error_wait, binder_stop_on_user_error < 2);
 	if (ret)
 		goto err_unlocked;
 
+	// 在proc进程中查找该线程对应的binder_thread；若查找失败，则新建一个binder_thread，并添加到proc->threads中。
 	thread = binder_get_thread(proc);
 	if (thread == NULL) {
 		ret = -ENOMEM;
@@ -4877,6 +4885,15 @@ static const struct vm_operations_struct binder_vm_ops = {
 	.fault = binder_vm_fault,
 };
 
+/*
+ * mmap的作用是进行内存映射。当应用调用mmap()映射内存到进程虚拟地址时，该函数会进行两个操作：
+ * 第一，将指定大小的"物理内存" 映射到 "用户空间"(即，进程的虚拟地址中)。 第二，将该"物理内存" 也映射到 "内核空间(即，内核的虚拟地址中)"。
+ * 简单来说，就是"将进程虚拟地址空间和内核虚拟地址空间映射同一个物理页面"。为什么要这么做呢？这就是Binder进程间通信机制的精髓所在了！
+ * 在Binder通信机制中，mmap()会将Server进程的虚拟地址和内核虚拟地址映射到同一个物理页面。
+ * 那么当Client进程向Server进程发送请求时，只需要将Client的数据拷贝到内核空间即可！
+ * 由于Server进程的地址和内核空间映射到同一个物理页面，因此，Client中的数据拷贝到内核空间时，也就相当于拷贝到了Server进程中。
+ * 因此，Binder通信机制中，数据传输时，只需要1次内存拷贝！
+ */
 static int binder_mmap(struct file *filp, struct vm_area_struct *vma)
 {
 	int ret;
@@ -4886,6 +4903,7 @@ static int binder_mmap(struct file *filp, struct vm_area_struct *vma)
 	if (proc->tsk != current->group_leader)
 		return -EINVAL;
 
+	// 有效性检查：映射的内存不能大于4M
 	if ((vma->vm_end - vma->vm_start) > SZ_4M)
 		vma->vm_end = vma->vm_start + SZ_4M;
 
@@ -4918,6 +4936,11 @@ err_bad_arg:
 	return ret;
 }
 
+/* 说明：binder_proc是记录进程上下文信息的结构体。该函数的作用如下。
+ * 创建并初始化binder_proc结构体变量proc。binder_proc是描述Binder进程的上下文信息结构体。这里，就是将ServiceManager这个进程的信息都存储到proc中。
+ * 将proc添加到全局哈希表binder_procs中。
+ * 将proc设为filp的私有成员。这样，在mmap()，ioctl()等函数中，我们都可以根据filp的私有成员来获取proc信息。
+ */
 static int binder_open(struct inode *nodp, struct file *filp)
 {
 	struct binder_proc *proc;
@@ -4952,10 +4975,10 @@ static int binder_open(struct inode *nodp, struct file *filp)
 	proc->pid = current->group_leader->pid;
 	INIT_LIST_HEAD(&proc->delivered_death);
 	INIT_LIST_HEAD(&proc->waiting_threads);
-	filp->private_data = proc;
+	filp->private_data = proc;	// 将proc添加到私有数据中。这样，mmap(),ioctl()等函数都可以通过私有数据获取到proc，即该进程的上下文信息
 
 	mutex_lock(&binder_procs_lock);
-	hlist_add_head(&proc->proc_node, &binder_procs);
+	hlist_add_head(&proc->proc_node, &binder_procs);	// 将proc添加到全局哈希表binder_procs中
 	mutex_unlock(&binder_procs_lock);
 
 	if (binder_debugfs_dir_entry_proc) {
